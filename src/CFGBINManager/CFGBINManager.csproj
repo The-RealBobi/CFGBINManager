@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PathMap>$(MSBuildProjectDirectory)=/_/src/CFGBINManager</PathMap>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Description>Managed T2B and RDBNP record API with lossless CFG interchange.</Description>
+  </PropertyGroup>
+  <ItemGroup><None Include="../../data/structure.cfg" Link="data/structure.cfg" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="contentFiles/any/any/data/structure.cfg" PackageCopyToOutput="true" /><None Include="../../README.md" Pack="true" PackagePath="/" /></ItemGroup>
+</Project>
