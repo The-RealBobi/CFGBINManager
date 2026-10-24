@@ -5,8 +5,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <PathMap>$(MSBuildProjectDirectory)=/_/src/CFGBINManager</PathMap>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Authors>The-RealBobi</Authors>
+    <PackageProjectUrl>https://github.com/The-RealBobi/CFGBINManager</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/The-RealBobi/CFGBINManager</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <Description>Managed T2B and RDBNP record API with lossless CFG interchange.</Description>
   </PropertyGroup>
-  <ItemGroup><None Include="../../data/structure.cfg" Link="data/structure.cfg" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="contentFiles/any/any/data/structure.cfg" PackageCopyToOutput="true" /><None Include="../../README.md" Pack="true" PackagePath="/" /></ItemGroup>
+  <ItemGroup><None Include="../../LICENSE" Pack="true" PackagePath="/" /><None Include="../../data/structure.cfg" Link="data/structure.cfg" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="contentFiles/any/any/data/structure.cfg" PackageCopyToOutput="true" /><None Include="../../README.md" Pack="true" PackagePath="/" /></ItemGroup>
 </Project>
