@@ -1,11 +1,11 @@
-# CFGBINManager v1.0.0
+# CFGBINManager v1.0.1
 
 ## Add it to your project
 
 Use a .NET 10 project and install [CFGBINManager from NuGet](https://www.nuget.org/packages/CFGBINManager):
 
 ```sh
-dotnet add package CFGBINManager --version 1.0.0
+dotnet add package CFGBINManager --version 1.0.1
 ```
 
 To use the source directly, add this to your `.csproj`, adjusting the relative path:
