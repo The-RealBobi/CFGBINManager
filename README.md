@@ -1,4 +1,4 @@
-# CFGBINManager v0.2.6
+# CFGBINManager v1.0.0
 
 Managed .NET API for loading, querying and editing Level-5 T2B and RDBNP record files, independent of VictoryTool. Targets .NET 10 on Windows and macOS, including Apple Silicon. No UI, native library or external NuGet dependency.
 
@@ -55,6 +55,8 @@ The API handles these maintenance operations:
 - Unknown nonempty RDBNP reference bindings block structural edits, since the API cannot safely choose which list they target. Scalar edits and unchanged reconstruction remain available.
 
 Physical row order, duplicates and descriptor order are retained. An auxiliary index is a separate lookup order; it does not reorder the rows themselves. The library does not infer game policies from filenames or names containing `BEGIN`/`COUNT`.
+
+Create an empty UTF-8 T2B document with `CfgDocument.CreateT2b(catalog)`, then create/insert records with `CreateT2bRow` / `InsertRow`. RDBNP creation requires a native schema from an existing document.
 
 ## `data/structure.cfg`
 
@@ -114,6 +116,18 @@ The supplied catalog retains all 2,780 T2B entry names, 549 RDBNP types, 90 prev
 
 The catalog includes the researched character, item and resource labels while retaining former `UnkN` aliases. There are 5,244 unresolved T2B labels. Labels identify known data meanings; gameplay rules such as legality remain the consumer's responsibility.
 
+Editable display names can be stored separately from canonical names and aliases:
+
+```text
+LABEL "T2B", "CHARA_BASE_INFO", 34, "0", "Character ID";
+```
+
+Place LABEL declarations inside their GAME block (or beside legacy declarations). They are scoped by native record name, value count and a dot-separated numeric component path. `SetFieldLabels` validates a batch before applying it; `GetFieldLabel` resolves a display name; `ToText()` serializes the catalog including every profile, existing aliases, maintenance rules and edited labels. Display names do not change binary identities or the aliases used by row queries.
+
+`SetChildRules` replaces a selected game's explicit CHILD relationships after validating distinct names and rejecting cycles; `ToText` preserves these edits along with all aliases, profiles and maintenance rules. This supports authored, name-based containment without embedding a fake parent pointer in T2B records.
+
+`MoveT2bRows(start, count, destination)` and `MoveListRows(list, start, count, destination)` move existing rows transactionally, with the destination expressed in the original order. Declared row references follow their target identities. Referenced ranges must remain contiguous; unsupported auxiliary indices are rejected. Writers recalculate declared counts. `GetBlockEnd` reports declared or conventional _BEG/_BGN/_BEGIN/_START closing names; `GetRecordTree` projects matching conventional pairs as well as declared scopes. Projection does not guess a missing counter field.
+
 ## CFG interchange and exact reconstruction
 
 Content retains the readable DUMP syntax:
@@ -123,6 +137,8 @@ CHARA_BODY_INFO 100, "skeleton.g4sk", "body.g4md", 123456;
 ```
 
 Lossless exports also contain `// @...` metadata statements. They preserve the native descriptors, per-row type shapes, exact string references, ordered physical string/name pools, padding and indices. Structured metadata is JSON inside a quoted CFG string; byte arrays describe opaque regions only. Floating NaN payloads use hexadecimal bit literals. There is no embedded original BIN or unmodified-file shortcut, and ordinary row payloads are not duplicated in metadata.
+
+`CfgTextCodec.WriteReadable(document)` emits an alternative full-document CFG: one value per line with field-name/type comments, followed by gzip/base64 reconstruction metadata. `Read` accepts both forms. The readable writer does not duplicate row payloads in its footer. Keep the header and footer; values can be edited directly, while structural edits (record identity/order/count) must be made through the API/editor before exporting again. Decompressed metadata is limited to 256 MiB. Leading whitespace/comments do not disable reconstruction.
 
 Retain those comments when editing text if byte identity matters. Every write allocates a new buffer and reconstructs records. Changing a shared string in one field appends/reuses the appropriate pool string without altering other references. Unused and duplicated physical strings survive unchanged reconstruction.
 
@@ -150,3 +166,29 @@ Historical reconstruction evidence is separate from the current package build. D
 `CfgDocument.T2bInfo` exposes source string-pool bounds and encoding; `CfgRow.T2bInfo` exposes source value offsets, raw words and name candidates for binary-loaded T2B records. Newly created, cloned or CFG-imported rows may have no source provenance. `CfgList.TypeName` identifies an RDBNP list's native type even when the list is empty. These properties do not retain an original BIN buffer.
 
 `BinCodec.WriteWithFixedStringEdits(document, edits)` reconstructs T2B before applying bounded encoded replacements, pads unused allocation bytes with spaces, and rejects shared or overlapping suffix references. It preserves the caller document and rejects null strings, NUL text and growth beyond the allocation. Ordinary editable strings should use row edits followed by `BinCodec.Write`.
+
+## Record containment
+
+`document.GetRecordTree()` returns read-only `CfgRecordNode` roots. Each node has `Row`, `ListName`, `RowIndex` and `Children`. T2B nodes refer to source rows and use the selected catalog's COUNT start/end scopes; closing records remain the final child and empty-ended scopes extend to EOF. RDBNP list containers have a null Row and RowIndex -1; their children refer to list-local row indices. The projection never reorders or mutates the document. Recompute it after structural changes. Unknown rows retain their physical location; conventional matched boundary suffixes are display hints, and ID references do not imply ownership. Unmatched, crossed or conflicting declared block boundaries throw InvalidDataException. This tree validation is stricter than independent COUNT recalculation because a tree requires properly nested scopes.
+
+Contiguous companion records can be declared inside the game profile with `CHILD "T2B", "PARENT_RECORD", "CHILD_RECORD";`. A child attaches only to an active preceding parent in the same block, while successive declared children continue that branch; unrelated siblings close it. Orphan companions remain at their physical location. This is display containment, not a deletion/copy cascade or an index reference. The bundled catalog declares CHARA_BASE_INFO_REF_BATTLE as a child of its preceding CHARA_BASE_INFO based on the existing native loader evidence.
+
+## Explicit document edits
+
+T2B consumers can use CreateT2bRow, SetT2bValue, InsertT2bValue and RemoveT2bValue without manipulating opaque layout objects. These operations validate native physical kinds, 32-bit limits, NUL strings and the 255-value row limit. Existing SetValue keeps its same-kind contract. Serialize/reparse a cloned document before adopting risky structural edits; count/index declarations can reject an edit that changes a required layout.
+
+ConvertTextEncoding(0/1) returns a reconstructed T2B document in Shift-JIS/UTF-8 without mutating its input. It re-encodes physical pools, rebuilds name offsets/hashes and clears stale string offsets. Unrepresentable text, nonstandard hashes and unresolved names fail explicitly. TextEncodingCode also works for CFG-loaded documents.
+
+CfgTextCodec.WriteFragment(document, rows) emits selected physical rows with their typed CFG metadata and required native schema. It excludes original global string pools, whole-file opaque gaps and original index keys. A fragment is for import, not independent binary reconstruction. CloneForImport clears source string-pointer provenance, including nested strings. Reference-bearing records require a target mapping; single-row insertion is not an automatic cross-document reference remapper.
+
+Conventional containment is a display inference: unmatched markers remain ordinary rows, without adding or removing binary records. Explicit Structure COUNT scopes remain strict.
+
+## ConflictMerge API
+
+`CfgMergePlan.GetKeyOptions(current, incoming)` lists unique scalar key candidates by native list and entry type. Select `MergeKey` values explicitly, then call `CfgMergePlan.Analyze(current, incoming, keys)`. An empty key selection matches repeated entries by exact subtree content, using occurrence queues so duplicates are not collapsed. A single entry of the same type in a parent is paired by role. Keys are scoped to siblings, never physical or display indices.
+
+The plan exposes `Conflicts`, `MatchedRows`, `AddedRows` and `CurrentOnlyRows`. Every conflict must receive `MergeSide.Current` or `MergeSide.Incoming` in the dictionary supplied to `Build`. Counts are maintained by the writer; T2B ranges are chosen atomically. Declared T2B row indices/ranges and native RDBNP references are remapped to merged rows. Live native references without a target declaration and split/reordered ranges fail explicitly. Equal stable leaf reference destinations are compared by content without changing the reference maps.
+
+The result retains the current document's ordering/layout, adds incoming-only branches before closing markers, and preserves current-only rows. There is no inferred deletion policy or three-way change detection: two files cannot establish which conflicting value was an intentional mod edit. T2B matched values must have compatible shapes; RDBNP requires the same native types and lists. Trees deeper than 128 blocks are rejected before recursive merge processing. Both sources and catalogs are snapshotted, and every Build returns an independently reconstructed and validated document.
+
+`CfgMergePlan.Entries` exposes the planned hierarchy as read-only `MergeEntry` and `MergeField` snapshots. Fields retain both source values, conflict IDs and automatic counter previews for review interfaces. Closing entries remain in this projection so consumers can present every field.

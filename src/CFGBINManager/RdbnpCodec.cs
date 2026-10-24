@@ -754,6 +754,39 @@ internal static class RdbnpCodec
         CfgRow row = list.MutableRows[index]; list.MutableRows.RemoveAt(index); row.Document = null;
     }
 
+    internal static void MoveRows(CfgDocument document, CfgList target, int start, int count, int destination)
+    {
+        var reordered = CfgDocument.Reorder(target.Rows, start, count, destination);
+        ValidateReferences(document);
+        if (target.Layout!.IndexOffset != 0 && document.Catalog.GetIndexKey(target.Name) is null && target.Layout.IndexKey is null)
+            throw Error($"An INDEX_KEY declaration is required to reorder {target.Name}.");
+        var positions = reordered.Select((row, index) => (row, index)).ToDictionary(item => item.row, item => item.index);
+        int[] mapping = target.Rows.Select(row => positions[row]).ToArray();
+        var edits = new List<(CfgRow Row, int Field, CfgValue Value)>();
+        foreach (var list in document.Lists)
+        {
+            var fields = RootFields(document.Rdb!, list.Layout!, document.Catalog);
+            foreach (var row in list.Rows)
+                for (int i = 0; i < fields.Count; i++)
+                {
+                    var original = row.Values[i];
+                    var changed = TransformReferences(document, row.Name, fields[i].Field, original, (type, field, value) =>
+                    {
+                        var range = value.AsRange();
+                        if (range.Count == 0) return value;
+                        var rule = document.Catalog.References.SingleOrDefault(rule => rule.Type == type && rule.Field == field)
+                            ?? throw Error($"Cannot reorder {target.Name}: incoming reference {type}.{field} has no REFERENCE declaration.");
+                        if (rule.Target != target.Name) return value;
+                        int next = CfgDocument.RemapRange(checked((int)range.Start), checked((int)range.Count), mapping);
+                        return value.Kind == ValueKind.Reference16 ? CfgValue.Range16(checked((ushort)next), checked((ushort)range.Count)) : CfgValue.Range32(checked((uint)next), range.Count);
+                    });
+                    if (!ReferenceEquals(changed, original)) edits.Add((row, i, changed));
+                }
+        }
+        foreach (var edit in edits) edit.Row.Assign(edit.Field, edit.Value);
+        target.MutableRows.Clear(); target.MutableRows.AddRange(reordered);
+    }
+
     private static List<(CfgRow Row, int Field, CfgValue Value)> RebaseReferences(CfgDocument document, CfgList target, int index, bool insert)
     {
         var changes = new List<(CfgRow, int, CfgValue)>();
@@ -798,7 +831,7 @@ internal static class RdbnpCodec
         return changes;
     }
 
-    private static CfgValue TransformReferences(CfgDocument document, string typeName, RdbField field, CfgValue value, Func<string, string, CfgValue, CfgValue> transform)
+    internal static CfgValue TransformReferences(CfgDocument document, string typeName, RdbField field, CfgValue value, Func<string, string, CfgValue, CfgValue> transform)
     {
         if (field.Count > 1)
         {

@@ -4,11 +4,18 @@ using System.Text.Json;
 
 namespace CFGBINManager;
 
-public static class CfgTextCodec
+public static partial class CfgTextCodec
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { RespectNullableAnnotations = true };
     private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
-    public static string Write(CfgDocument document)
+    public static string Write(CfgDocument document) => WriteCore(document, null);
+    public static string WriteFragment(CfgDocument document, IReadOnlyList<CfgRow> rows)
+    {
+        var selected = rows.ToHashSet();
+        if (selected.Count == 0 || selected.Any(row => row.Document != document)) throw new ArgumentException("Select records belonging to this document.", nameof(rows));
+        return "// Record fragment; import into a matching document.\n" + WriteCore(document, selected);
+    }
+    private static string WriteCore(CfgDocument document, HashSet<CfgRow>? selected)
     {
         if (document.Format == BinaryFormat.T2b) document.Catalog.ValidateLinks(document);
         var counters = document.Format == BinaryFormat.T2b ? document.Catalog.CalculateCounts(document) : new Dictionary<(CfgRow Row, int Position), CfgValue>();
@@ -17,22 +24,34 @@ public static class CfgTextCodec
         output.Append("// @FORMAT ").Append(CfgSyntax.Quote(document.Format == BinaryFormat.T2b ? "T2B" : "RDBNP")).AppendLine(", 1;");
         if (document.Format == BinaryFormat.T2b)
         {
-            Meta("T2B_LAYOUT", document.T2b ?? new T2bLayout());
-            foreach (CfgRow row in document.Rows) WriteRow(row);
+            Meta("T2B_LAYOUT", selected is null ? document.T2b ?? new T2bLayout() : new T2bLayout { EncodingCode = document.TextEncodingCode ?? 1 });
+            foreach (CfgRow row in document.Rows.Where(row => selected is null || selected.Contains(row))) WriteRow(row);
         }
         else
         {
-            Meta("RDB_LAYOUT", document.Rdb ?? throw new InvalidDataException("RDBNP document has no native schema."));
+            var layout = document.Rdb ?? throw new InvalidDataException("RDBNP document has no native schema.");
+            if (selected is not null)
+            {
+                layout = JsonSerializer.Deserialize<RdbLayout>(JsonSerializer.Serialize(layout, JsonOptions), JsonOptions)!;
+                layout.Strings.Clear(); layout.Names.Clear(); layout.Gaps.Clear(); layout.HeaderExtra = [];
+                foreach (var root in layout.Roots)
+                {
+                    root.Index.Clear(); root.OriginalIndexKeys.Clear(); root.RowCount = root.OriginalRowCount = 0;
+                    root.OriginalRowsFingerprint = "";
+                }
+            }
+            Meta("RDB_LAYOUT", layout);
             for (int i = 0; i < document.Lists.Count; i++)
             {
                 output.Append("// @LIST ").Append(i).Append(", ").Append(CfgSyntax.Quote(document.Lists[i].Name)).AppendLine(";");
-                foreach (CfgRow row in document.Lists[i].Rows) WriteRow(row);
+                foreach (CfgRow row in document.Lists[i].Rows.Where(row => selected is null || selected.Contains(row))) WriteRow(row);
             }
         }
         return output.ToString();
         void WriteRow(CfgRow row)
         {
-            Meta("ROW", new RowLayout(row.NameHash, row.FieldNames.ToArray(), row.Padding, row.TypeBytes, row.StringOffsets, row.RdbPadding, row.Values.Select(Shape).ToArray()));
+            Meta("ROW", new RowLayout(row.NameHash, row.FieldNames.ToArray(), row.Padding, row.TypeBytes,
+                selected is null ? row.StringOffsets : Enumerable.Repeat(-1, row.Values.Count).ToArray(), row.RdbPadding, row.Values.Select(Shape).ToArray()));
             output.Append(IsIdentifier(row.Name) ? row.Name : CfgSyntax.Quote(row.Name));
             var atoms = row.Values.Select((value, index) => counters.GetValueOrDefault((row, index), value)).SelectMany(Flatten).ToArray();
             if (atoms.Length != 0) output.Append(' ').AppendJoin(", ", atoms.Select(Print));
@@ -42,7 +61,7 @@ public static class CfgTextCodec
     public static CfgDocument Read(string text, StructureCatalog catalog)
     {
         catalog.RequireProfileSelection();
-        try { return ReadCore(text, catalog); }
+        try { return ReadCore(ExpandReadable(text), catalog); }
         catch (Exception error) when (error is JsonException or FormatException or OverflowException or ArgumentOutOfRangeException)
         { throw new InvalidDataException("Invalid CFG metadata or value: " + error.Message, error); }
     }

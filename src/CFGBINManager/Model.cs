@@ -45,9 +45,9 @@ public sealed class CfgRow
     private BinaryFormat lookupFormat;
     internal CfgDocument? Document { get; set; }
     public string Name { get; }
-    public uint NameHash { get; }
+    public uint NameHash { get; internal set; }
     public IReadOnlyList<CfgValue> Values => values.AsReadOnly();
-    public IReadOnlyList<string> FieldNames { get; }
+    public IReadOnlyList<string> FieldNames { get; private set; }
     public T2bRowInfo? T2bInfo { get; internal set; }
     internal List<OpaqueRegion> RdbPadding { get; set; } = [];
     internal byte[] Padding { get; set; }
@@ -64,6 +64,15 @@ public sealed class CfgRow
         Padding = Padding.ToArray(), TypeBytes = TypeBytes.ToArray(), StringOffsets = StringOffsets.ToArray(),
         RdbPadding = RdbPadding.Select(region => new OpaqueRegion(region.Offset, region.Bytes.ToArray())).ToList()
     };
+    public CfgRow CloneForImport()
+    {
+        var clone = Clone();
+        Array.Fill(clone.StringOffsets, -1);
+        for (int i = 0; i < clone.values.Count; i++) clone.values[i] = ResetStrings(clone.values[i]);
+        return clone;
+        static CfgValue ResetStrings(CfgValue value) => value.Kind == ValueKind.String ? value with { Bits = 0 }
+            : value.Items.Count == 0 ? value : value with { Items = value.Items.Select(ResetStrings).ToArray() };
+    }
     public CfgValue GetValue(string name) => values[FieldIndex(name)];
     public void SetValue(string name, CfgValue value) => SetValue(FieldIndex(name), value);
     public void SetValue(int index, CfgValue value)
@@ -72,6 +81,14 @@ public sealed class CfgRow
         values[index] = value;
     }
     internal void Assign(int index, CfgValue value) => values[index] = value;
+    internal void ResizeValues(int index, CfgValue? inserted)
+    {
+        var offsets = StringOffsets.ToList();
+        if (inserted is null) { values.RemoveAt(index); offsets.RemoveAt(index); }
+        else { values.Insert(index, inserted); offsets.Insert(index, -1); }
+        StringOffsets = offsets.ToArray(); TypeBytes = [];
+        FieldNames = Enumerable.Range(0, values.Count).Select(i => i.ToString(CultureInfo.InvariantCulture)).ToArray();
+    }
     private int FieldIndex(string name)
     {
         string native = (Document?.Catalog ?? lookupCatalog)?.ResolveField(Document?.Format ?? lookupFormat, Name, name, values.Count) ?? name;
@@ -91,11 +108,12 @@ public sealed class CfgList
     internal RdbRoot? Layout { get; set; }
 }
 
-public sealed class CfgDocument
+public sealed partial class CfgDocument
 {
     internal readonly List<CfgRow> MutableRows = [];
     internal readonly List<CfgList> MutableLists = [];
     public BinaryFormat Format { get; }
+    public int? TextEncodingCode => Format == BinaryFormat.T2b ? T2b?.EncodingCode ?? 1 : null;
     public StructureCatalog Catalog { get; }
     public T2bDocumentInfo? T2bInfo { get; internal set; }
     public ushort? BinaryVersion => Rdb?.Version;
@@ -104,6 +122,7 @@ public sealed class CfgDocument
         RdbnpCodec.TypeFields(Rdb, index, Catalog).Select(item => new CfgField(item.Field.Name, item.Field.Code, item.Field.Flags, item.Field.Size, item.Field.Count, item.Field.Offset, item.Offset)).ToArray())).ToArray();
     public IReadOnlyList<CfgRow> Rows => MutableRows.AsReadOnly();
     public IReadOnlyList<CfgList> Lists => MutableLists.AsReadOnly();
+    public IReadOnlyList<CfgRecordNode> GetRecordTree() => RecordTree.Build(this);
     internal T2bLayout? T2b { get; set; }
     internal RdbLayout? Rdb { get; set; }
     internal CfgDocument(BinaryFormat format, StructureCatalog catalog) { Format = format; Catalog = catalog; }

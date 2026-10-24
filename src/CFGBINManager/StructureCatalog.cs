@@ -6,8 +6,9 @@ public sealed record CountRule(string Start, int Position, string Child, string 
 public sealed record RowIndexRule(string Source, int Position, string Target, int? Absent);
 public sealed record RangeRule(string Source, int StartPosition, int CountPosition, string Target);
 public sealed record ReferenceRule(string Type, string Field, string Target);
+public sealed record ChildRule(string Parent, string Child);
 
-public sealed class StructureCatalog
+public sealed partial class StructureCatalog
 {
     private readonly Dictionary<(BinaryFormat, string), string> entries = [];
     private readonly Dictionary<(BinaryFormat, string, string), string> fields = [];
@@ -17,6 +18,8 @@ public sealed class StructureCatalog
     private readonly List<ReferenceRule> references = [];
     private readonly List<RangeRule> ranges = [];
     private readonly List<RowIndexRule> rowIndices = [];
+    private readonly List<ChildRule> children = [];
+    public IReadOnlyList<ChildRule> Children => children.AsReadOnly();
     public IReadOnlyList<RowIndexRule> RowIndices => rowIndices.AsReadOnly();
     public IReadOnlyList<RangeRule> Ranges => ranges.AsReadOnly();
     public IReadOnlyList<CountRule> Counts => counts.AsReadOnly();
@@ -38,6 +41,25 @@ public sealed class StructureCatalog
         var declared = GetFields(format, entry);
         return format == BinaryFormat.T2b && declared.Count != valueCount ? [] : declared;
     }
+    public void SetChildRules(IReadOnlyList<ChildRule> rules)
+    {
+        RequireProfileSelection();
+        var unique = rules.Distinct().ToArray();
+        if (unique.Any(rule => string.IsNullOrWhiteSpace(rule.Parent) || string.IsNullOrWhiteSpace(rule.Child) || rule.Parent == rule.Child))
+            throw new ArgumentException("Parent and child must have distinct nonempty entry names.", nameof(rules));
+        var links = unique.GroupBy(rule => rule.Parent).ToDictionary(group => group.Key, group => group.Select(rule => rule.Child).ToArray());
+        foreach (var root in links.Keys)
+        {
+            var seen = new HashSet<string>(); var pending = new Stack<string>(links[root]);
+            while (pending.TryPop(out string? name))
+            {
+                if (name == root) throw new ArgumentException("Child relationships cannot contain a cycle.", nameof(rules));
+                if (seen.Add(name) && links.TryGetValue(name, out var nested)) foreach (string child in nested) pending.Push(child);
+            }
+        }
+        children.Clear(); children.AddRange(unique);
+    }
+
     internal void RequireProfileSelection()
     {
         if (profiles is not null && profiles.Count > 1 && ProfileName is null) throw new InvalidOperationException("Select a game with ForProfile before using this catalog.");
@@ -52,6 +74,7 @@ public sealed class StructureCatalog
         {
             var selected = ParseDeclarations(StructureConfig.Declarations(profile));
             selected.ProfileName = profile.Name;
+            selected.sourceProfile = profile;
             foreach (StructureEntry entry in profile.Entries)
             {
                 selected.definitions.Add((entry.Format, entry.Name), Array.AsReadOnly(entry.Fields.ToArray()));
@@ -65,7 +88,7 @@ public sealed class StructureCatalog
     }
     private static StructureCatalog ParseDeclarations(string text)
     {
-        var catalog = new StructureCatalog();
+        var catalog = new StructureCatalog { sourceDeclarations = text };
         bool version = false;
         foreach (var statement in CfgSyntax.Parse(text))
         {
@@ -73,11 +96,12 @@ public sealed class StructureCatalog
             string S(int i) => v[i].Text;
             int N(int i) => checked((int)CfgSyntax.Integer(v[i]));
             BinaryFormat F() => S(0) switch { "T2B" => BinaryFormat.T2b, "RDBNP" => BinaryFormat.Rdbnp, _ => throw new InvalidDataException($"Unknown catalog format '{S(0)}'.") };
-            int required = statement.Name switch { "STRUCTURE_VERSION" => 1, "ENTRY" => 3, "FIELD" => 4, "COUNT" => 5, "RANGE" => 5, "ROW_INDEX" => 5, "REFERENCE" => 3, "INDEX_KEY" => 2, "LAYOUT_FIELD" => 4, _ => throw new InvalidDataException($"Unknown catalog declaration '{statement.Name}'.") };
+            int required = statement.Name switch { "STRUCTURE_VERSION" => 1, "ENTRY" => 3, "FIELD" => 4, "COUNT" => 5, "RANGE" => 5, "ROW_INDEX" => 5, "REFERENCE" => 3, "CHILD" => 3, "INDEX_KEY" => 2, "LAYOUT_FIELD" => 4, "LABEL" => 5, _ => throw new InvalidDataException($"Unknown catalog declaration '{statement.Name}'.") };
             if (v.Count != required) throw new InvalidDataException($"{statement.Name} requires {required} arguments.");
             switch (statement.Name)
             {
                 case "STRUCTURE_VERSION": if (N(0) != 1 || version) throw new InvalidDataException("Expected exactly one STRUCTURE_VERSION 1 declaration."); version = true; break;
+                case "LABEL": catalog.SetFieldLabels([new StructureLabel(F(), S(1), N(2), S(3), S(4))]); break;
                 case "ENTRY": Add(catalog.entries, (F(), S(2)), S(1)); break;
                 case "FIELD": Add(catalog.fields, (F(), S(1), S(3)), S(2)); break;
                 case "COUNT":
@@ -96,6 +120,10 @@ public sealed class StructureCatalog
                     var reference = new ReferenceRule(S(0), S(1), S(2));
                     if (catalog.references.Any(r => r.Type == reference.Type && r.Field == reference.Field && r.Target != reference.Target)) throw new InvalidDataException($"Conflicting reference for {reference.Type}.{reference.Field}.");
                     if (!catalog.references.Contains(reference)) catalog.references.Add(reference); break;
+                case "CHILD":
+                    if (F() != BinaryFormat.T2b || S(1).Length == 0 || S(2).Length == 0 || S(1) == S(2)) throw new InvalidDataException("CHILD requires T2B and distinct nonempty parent/child names.");
+                    var child = new ChildRule(S(1), S(2));
+                    if (!catalog.children.Contains(child)) catalog.children.Add(child); break;
                 case "INDEX_KEY": Add(catalog.indices, S(0), S(1)); break;
                 case "LAYOUT_FIELD": if (N(3) < 0) throw new InvalidDataException("Layout offsets cannot be negative."); Add(catalog.layouts, (S(0), checked((uint)CfgSyntax.Integer(v[1])), S(2)), N(3)); break;
             }
