@@ -6,8 +6,14 @@ using System.Text.Json;
 namespace CFGBINManager;
 
 public enum MergeSide { Current, Incoming }
-public sealed record MergeKey(string Scope, string Entry, int Position);
-public sealed record MergeKeyOptions(string Scope, string Entry, IReadOnlyList<int> Positions, int? SuggestedPosition);
+public sealed record MergeKey(string Scope, string Entry, int Position)
+{
+    public IReadOnlyList<int> AdditionalPositions { get; init; } = [];
+}
+public sealed record MergeKeyOptions(string Scope, string Entry, IReadOnlyList<int> Positions, int? SuggestedPosition)
+{
+    public IReadOnlyList<int> SuggestedKeyPositions { get; init; } = SuggestedPosition is int position ? [position] : [];
+}
 public sealed record MergeConflict(int Id, string Location, string Field, CfgValue Current, CfgValue Incoming, CfgValue? CurrentTarget, CfgValue? IncomingTarget);
 public enum MergeEntryState { Matched, File1Only, File2Only, Conflict }
 public sealed record MergeField(string Name, CfgValue? File1, CfgValue? File2, int? ConflictId, CfgValue? AutomaticValue);
@@ -32,7 +38,7 @@ public sealed class CfgMergePlan
     private sealed record ValueChoice(CfgValue Current, CfgValue? Incoming, int? Conflict, IReadOnlyList<ValueChoice> Children);
     private readonly CfgDocument current;
     private readonly CfgDocument incoming;
-    private readonly Dictionary<(string Scope, string Entry), int> keys;
+    private readonly Dictionary<(string Scope, string Entry), int[]> keys;
     private readonly Dictionary<CfgRow, Node> currentNodes = [];
     private readonly Dictionary<CfgRow, Node> incomingNodes = [];
     private readonly Dictionary<CfgRecordNode, string> fingerprints = [];
@@ -60,12 +66,26 @@ public sealed class CfgMergePlan
             CfgRow[] a = leftGroups.SelectMany(group => group).ToArray(), b = rightGroups.SelectMany(group => group).ToArray();
             var rows = a.Concat(b).ToArray();
             int width = rows.Min(row => row.Values.Count);
-            var candidates = Enumerable.Range(0, width).Where(i => rows.All(row => row.Values[i].Items.Count == 0
-                && row.Values[i].Kind is not (ValueKind.Reference16 or ValueKind.Reference32))
-                && groups.All(group => group.Select(row => Token(row.Values[i])).Distinct(StringComparer.Ordinal).Count() == group.Length)
+            var scalarPositions = Enumerable.Range(0, width).Where(i => rows.All(row => row.Values[i].Items.Count == 0
+                && row.Values[i].Kind is not (ValueKind.Array or ValueKind.Structure or ValueKind.Vector or ValueKind.Reference16 or ValueKind.Reference32))
                 && !IsMaintained(current, key.Entry, i)).ToArray();
+            bool Unique(int[] positions) => groups.All(group => group.Select(row => KeyToken(row, positions)).Distinct(StringComparer.Ordinal).Count() == group.Length);
+            bool Overlaps(int[] positions) => a.Select(row => KeyToken(row, positions)).Intersect(b.Select(row => KeyToken(row, positions)), StringComparer.Ordinal).Any();
+            var candidates = scalarPositions.Where(i => Unique([i])).ToArray();
             int? suggested = candidates.Cast<int?>().FirstOrDefault(i => a.Select(row => Token(row.Values[i!.Value])).Intersect(b.Select(row => Token(row.Values[i!.Value])), StringComparer.Ordinal).Any());
-            result.Add(new(key.Scope, key.Entry, candidates, suggested));
+            int[] suggestedPositions = suggested is int position ? [position] : [];
+            // An earlier compound identity takes precedence over a later unique payload field.
+            for (int i = 0; i < scalarPositions.Length && (suggestedPositions.Length == 0 || scalarPositions[i] < suggestedPositions[0]); i++)
+            {
+                if (candidates.Contains(scalarPositions[i])) continue;
+                for (int j = i + 1; j < scalarPositions.Length; j++)
+                {
+                    if (candidates.Contains(scalarPositions[j])) continue;
+                    int[] pair = [scalarPositions[i], scalarPositions[j]];
+                    if (Unique(pair) && Overlaps(pair)) { suggestedPositions = pair; break; }
+                }
+            }
+            result.Add(new(key.Scope, key.Entry, candidates, suggested) { SuggestedKeyPositions = Array.AsReadOnly(suggestedPositions) });
         }
         return result.AsReadOnly();
     }
@@ -79,16 +99,19 @@ public sealed class CfgMergePlan
         var snapshot = CopyCatalog(source.Catalog);
         current = CfgTextCodec.Read(CfgTextCodec.Write(source), snapshot);
         incoming = CfgTextCodec.Read(CfgTextCodec.Write(mod), snapshot);
-        keys = new Dictionary<(string, string), int>();
+        keys = new Dictionary<(string, string), int[]>();
         var currentGroups = RowGroups(current); var incomingGroups = RowGroups(incoming);
         foreach (var key in selectedKeys)
         {
-            if (key.Position < 0 || !keys.TryAdd((key.Scope, key.Entry), key.Position)) throw new ArgumentException("Merge keys must have one nonnegative field position per entry and scope.", nameof(selectedKeys));
+            int[] positions = [key.Position, .. key.AdditionalPositions];
+            if (positions.Any(position => position < 0) || positions.Distinct().Count() != positions.Length || !keys.TryAdd((key.Scope, key.Entry), positions))
+                throw new ArgumentException("Merge keys must have distinct nonnegative field positions and one key per entry and scope.", nameof(selectedKeys));
             var rows = currentGroups.GetValueOrDefault((key.Scope, key.Entry), []).Concat(incomingGroups.GetValueOrDefault((key.Scope, key.Entry), [])).ToArray();
-            if (rows.Length == 0 || rows.Any(row => key.Position >= row.Values.Count || row.Values[key.Position].Items.Count != 0
-                || row.Values[key.Position].Kind is ValueKind.Array or ValueKind.Structure or ValueKind.Vector or ValueKind.Reference16 or ValueKind.Reference32)
-                || IsMaintained(current, key.Entry, key.Position))
-                throw new ArgumentException($"{key.Scope}/{key.Entry}: field {key.Position} is not a usable merge key.", nameof(selectedKeys));
+            foreach (int position in positions)
+                if (rows.Length == 0 || rows.Any(row => position >= row.Values.Count || row.Values[position].Items.Count != 0
+                    || row.Values[position].Kind is ValueKind.Array or ValueKind.Structure or ValueKind.Vector or ValueKind.Reference16 or ValueKind.Reference32)
+                    || IsMaintained(current, key.Entry, position))
+                    throw new ArgumentException($"{key.Scope}/{key.Entry}: field {position} is not a usable merge key.", nameof(selectedKeys));
         }
         current.Catalog.ValidateLinks(current); incoming.Catalog.ValidateLinks(incoming);
         roots = Pair(current.GetRecordTree(), incoming.GetRecordTree(), "", "");
@@ -215,13 +238,13 @@ public sealed class CfgMergePlan
         foreach (var group in b.GroupBy(Name))
         {
             var left = a.Where(node => Name(node) == group.Key).ToArray(); var right = group.ToArray();
-            if (keys.TryGetValue((scope, group.Key), out int position))
+            if (keys.TryGetValue((scope, group.Key), out var positions))
             {
                 string Key(CfgRecordNode node)
                 {
-                    if (node.Row is null || position >= node.Row.Values.Count || node.Row.Values[position].Items.Count != 0 || IsMaintained(current, node.Row.Name, position))
-                        throw new InvalidDataException($"{parent}/{group.Key}: field {position} is not a usable matching key.");
-                    return Token(node.Row.Values[position]);
+                    if (node.Row is null || positions.Any(position => position >= node.Row.Values.Count || node.Row.Values[position].Items.Count != 0 || IsMaintained(current, node.Row.Name, position)))
+                        throw new InvalidDataException($"{parent}/{group.Key}: fields {string.Join(", ", positions)} are not a usable matching key.");
+                    return KeyToken(node.Row, positions);
                 }
                 var lookup = new Dictionary<string, CfgRecordNode>(StringComparer.Ordinal);
                 foreach (var node in left) if (!lookup.TryAdd(Key(node), node)) throw new InvalidDataException($"{parent}/{group.Key}: File 1 has duplicate matching keys.");
@@ -252,8 +275,8 @@ public sealed class CfgMergePlan
             var native = left ?? right!;
             string nextScope = native.Row is null ? native.ListName! : scope;
             string label = native.Row?.Name ?? native.ListName!;
-            if (native.Row is { } row && keys.TryGetValue((scope, row.Name), out int key) && key < row.Values.Count)
-                label += "[" + DisplayKey(row.Values[key]) + "]";
+            if (native.Row is { } row && keys.TryGetValue((scope, row.Name), out var positions))
+                label += "[" + string.Join(", ", positions.Select(position => DisplayKey(row.Values[position]))) + "]";
             var node = new Node { Current = left?.Row, Incoming = right?.Row, Scope = nextScope, Location = parent + "/" + label, Label = label };
             if (left?.Row is { } currentRow) currentNodes.Add(currentRow, node);
             if (right?.Row is { } incomingRow) incomingNodes.Add(incomingRow, node);
@@ -388,6 +411,9 @@ public sealed class CfgMergePlan
         value = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload + "[" + string.Join(",", node.Children.Select(Fingerprint)) + "]")));
         fingerprints[node] = value; return value;
     }
+
+    private static string KeyToken(CfgRow row, IReadOnlyList<int> positions)
+        => string.Concat(positions.Select(position => Token(row.Values[position])));
 
     private static string Token(CfgValue value)
     {

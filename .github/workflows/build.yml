@@ -1,0 +1,48 @@
+name: Build CFGBINManager
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build and package
+        shell: bash
+        run: >-
+          dotnet pack src/CFGBINManager/CFGBINManager.csproj
+          --configuration Release --output dist --nologo
+          -p:RepositoryUrl="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: CFGBINManager-NuGet
+          path: dist/*.nupkg
+          if-no-files-found: error
