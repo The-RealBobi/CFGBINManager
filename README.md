@@ -1,12 +1,14 @@
-# CFGBINManager v1.0.2
+# CFGBINManager v1.0.3
 
 ## Add it to your project
 
-Use a .NET 10 project and install [CFGBINManager from NuGet](https://www.nuget.org/packages/CFGBINManager):
+Use a .NET 8, .NET 9 or .NET 10 project and install [CFGBINManager from NuGet](https://www.nuget.org/packages/CFGBINManager):
 
 ```sh
-dotnet add package CFGBINManager --version 1.0.2
+dotnet add package CFGBINManager --version 1.0.3
 ```
+
+Building the library from source requires the .NET 10 SDK.
 
 To use the source directly, add this to your `.csproj`, adjusting the relative path:
 
@@ -54,6 +56,15 @@ Use the entry and field names from your file. You can also address a field by po
 var value = row.Values[0];
 row.SetValue(0, CfgValue.Signed(123));
 ```
+
+## Remove rows
+
+```csharp
+var removed = document.FindRows("NOUN_INFO").Take(10).ToArray();
+document.RemoveRows(removed);
+```
+
+When removing a block, include its contained rows. A retained entry cannot keep a direct reference to a removed row.
 
 ## Save the result
 

@@ -42,6 +42,7 @@ public sealed class CfgMergePlan
     private readonly Dictionary<CfgRow, Node> currentNodes = [];
     private readonly Dictionary<CfgRow, Node> incomingNodes = [];
     private readonly Dictionary<CfgRecordNode, string> fingerprints = [];
+    private readonly Dictionary<MergeEntry, Node> entryNodes = new(ReferenceEqualityComparer.Instance);
     private readonly List<MergeConflict> conflicts = [];
     private readonly List<Node> roots;
     private readonly Dictionary<string, Dictionary<Node, int>> positions = new(StringComparer.Ordinal);
@@ -190,8 +191,10 @@ public sealed class CfgMergePlan
             }
             var state = row is null ? MergeEntryState.Matched : node.Current is null ? MergeEntryState.File2Only
                 : node.Incoming is null ? MergeEntryState.File1Only : fields.Any(field => field.ConflictId is not null) ? MergeEntryState.Conflict : MergeEntryState.Matched;
-            return new(name, label, node.Location, row is not null && parentEnd == name, state,
+            var entry = new MergeEntry(name, label, node.Location, row is not null && parentEnd == name, state,
                 fields.AsReadOnly(), Array.AsReadOnly(node.Children.Select(child => Project(child, end)).ToArray()));
+            entryNodes.Add(entry, node);
+            return entry;
 
             void Add(ValueChoice value, string field)
             {
@@ -204,18 +207,33 @@ public sealed class CfgMergePlan
     }
 
     public CfgDocument Build(IReadOnlyDictionary<int, MergeSide> resolutions)
+        => Build(resolutions, []);
+
+    public CfgDocument Build(IReadOnlyDictionary<int, MergeSide> resolutions, IReadOnlyCollection<MergeEntry> excludedEntries)
     {
-        foreach (MergeConflict conflict in conflicts)
-            if (!resolutions.TryGetValue(conflict.Id, out var side) || !Enum.IsDefined(side)) throw new ArgumentException($"Choose a value for conflict {conflict.Id + 1} before creating the result.", nameof(resolutions));
+        ArgumentNullException.ThrowIfNull(excludedEntries);
+        var excluded = new HashSet<Node>();
+        var pending = new Stack<Node>();
+        foreach (var entry in excludedEntries)
+        {
+            if (!entryNodes.TryGetValue(entry, out var node)) throw new ArgumentException("Excluded entries must belong to this merge plan.", nameof(excludedEntries));
+            pending.Push(node);
+        }
+        while (pending.TryPop(out var node))
+            if (excluded.Add(node)) foreach (var child in node.Children) pending.Push(child);
+        foreach (var node in AllNodes().Where(node => !excluded.Contains(node)))
+            foreach (var value in node.Values) ValidateChoice(value);
         var result = CfgTextCodec.Read(CfgTextCodec.Write(current), CopyCatalog(current.Catalog));
         if (result.Format == BinaryFormat.T2b) result.MutableRows.Clear();
         else foreach (CfgList list in result.Lists) list.MutableRows.Clear();
+        var removed = new List<CfgRow>();
         foreach (Node node in AllNodes())
         {
             if (node.Current is null && node.Incoming is null) continue;
             CfgRow row = (node.Current ?? node.Incoming!).CloneForImport();
-            for (int i = 0; i < node.Values.Count; i++) row.Assign(i, Resolve(node.Values[i], resolutions));
-            if (result.Format == BinaryFormat.T2b)
+            if (excluded.Contains(node)) removed.Add(row);
+            else for (int i = 0; i < node.Values.Count; i++) row.Assign(i, Resolve(node.Values[i], resolutions));
+            if (result.Format == BinaryFormat.T2b && !excluded.Contains(node))
                 foreach (var range in current.Catalog.Ranges.Where(rule => rule.Source == row.Name))
                 {
                     var value = row.Values[range.StartPosition].AsRange();
@@ -225,10 +243,18 @@ public sealed class CfgMergePlan
             if (result.Format == BinaryFormat.T2b) result.MutableRows.Add(row);
             else result.GetList(node.Scope).MutableRows.Add(row);
         }
+        result.RemoveRows(removed);
         _ = result.GetRecordTree();
         var validated = BinCodec.Read(BinCodec.Write(result), result.Catalog);
         _ = validated.GetRecordTree();
         return validated;
+
+        void ValidateChoice(ValueChoice value)
+        {
+            if (value.Conflict is int id && (!resolutions.TryGetValue(id, out var side) || !Enum.IsDefined(side)))
+                throw new ArgumentException($"Choose a value for conflict {id + 1} before creating the result.", nameof(resolutions));
+            foreach (var child in value.Children) ValidateChoice(child);
+        }
     }
 
     private List<Node> Pair(IReadOnlyList<CfgRecordNode> a, IReadOnlyList<CfgRecordNode> b, string scope, string parent)
