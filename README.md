@@ -1,11 +1,11 @@
-# CFGBINManager v1.0.3
+# CFGBINManager v1.0.4
 
 ## Add it to your project
 
 Use a .NET 8, .NET 9 or .NET 10 project and install [CFGBINManager from NuGet](https://www.nuget.org/packages/CFGBINManager):
 
 ```sh
-dotnet add package CFGBINManager --version 1.0.3
+dotnet add package CFGBINManager --version 1.0.4
 ```
 
 Building the library from source requires the .NET 10 SDK.

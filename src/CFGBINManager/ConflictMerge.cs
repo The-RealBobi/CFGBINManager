@@ -42,6 +42,7 @@ public sealed class CfgMergePlan
     private readonly Dictionary<CfgRow, Node> currentNodes = [];
     private readonly Dictionary<CfgRow, Node> incomingNodes = [];
     private readonly Dictionary<CfgRecordNode, string> fingerprints = [];
+    private readonly Dictionary<CfgRow, string> referenceIdentities = [];
     private readonly Dictionary<MergeEntry, Node> entryNodes = new(ReferenceEqualityComparer.Instance);
     private readonly List<MergeConflict> conflicts = [];
     private readonly List<Node> roots;
@@ -115,6 +116,7 @@ public sealed class CfgMergePlan
                     throw new ArgumentException($"{key.Scope}/{key.Entry}: field {position} is not a usable merge key.", nameof(selectedKeys));
         }
         current.Catalog.ValidateLinks(current); incoming.Catalog.ValidateLinks(incoming);
+        CollectReferenceIdentities(current); CollectReferenceIdentities(incoming);
         roots = Pair(current.GetRecordTree(), incoming.GetRecordTree(), "", "");
         foreach (Node node in AllNodes())
         {
@@ -257,6 +259,38 @@ public sealed class CfgMergePlan
         }
     }
 
+    private void CollectReferenceIdentities(CfgDocument document)
+    {
+        if (document.Format != BinaryFormat.Rdbnp) return;
+        var owners = new Dictionary<CfgRow, List<string>>();
+        foreach (var list in document.Lists)
+            foreach (var group in list.Rows.GroupBy(row => row.Name))
+            {
+                if (!keys.TryGetValue((list.Name, group.Key), out var positions)) continue;
+                foreach (var owner in group.GroupBy(row => KeyToken(row, positions)).Where(items => items.Count() == 1))
+                {
+                    var row = owner.Single();
+                    for (int i = 0; i < row.Values.Count; i++)
+                    {
+                        var value = row.Values[i];
+                        // shortcut: infer identity only for direct singleton references; arrays and ranges need explicit matching keys.
+                        if (value.Kind is not (ValueKind.Reference16 or ValueKind.Reference32) || value.AsRange().Count != 1) continue;
+                        var rule = document.Catalog.References.SingleOrDefault(rule => rule.Type == row.Name && rule.Field == row.FieldNames[i]);
+                        if (rule is null) continue;
+                        var target = document.GetList(rule.Target);
+                        uint index = value.AsRange().Start;
+                        if (index >= target.Rows.Count) throw new InvalidDataException($"Reference {row.Name}.{row.FieldNames[i]} exceeds {target.Name}.");
+                        var child = target.Rows[(int)index];
+                        if (keys.ContainsKey((target.Name, child.Name))) continue;
+                        if (!owners.TryGetValue(child, out var identities)) owners.Add(child, identities = []);
+                        identities.Add(JsonSerializer.Serialize(new[] { list.Name, row.Name, owner.Key, row.FieldNames[i] }));
+                    }
+                }
+            }
+        foreach (var pair in owners)
+            referenceIdentities.Add(pair.Key, JsonSerializer.Serialize(pair.Value.Order(StringComparer.Ordinal)));
+    }
+
     private List<Node> Pair(IReadOnlyList<CfgRecordNode> a, IReadOnlyList<CfgRecordNode> b, string scope, string parent)
     {
         var matches = new Dictionary<CfgRecordNode, CfgRecordNode>();
@@ -282,12 +316,23 @@ public sealed class CfgMergePlan
                     if (lookup.TryGetValue(key, out var match)) matches[node] = match;
                 }
             }
-            else if (left.Length == 1 && right.Length == 1) matches[right[0]] = left[0];
             else
             {
-                var lookup = left.GroupBy(Fingerprint).ToDictionary(group => group.Key, group => new Queue<CfgRecordNode>(group), StringComparer.Ordinal);
-                foreach (var node in right)
-                    if (lookup.TryGetValue(Fingerprint(node), out var queue) && queue.TryDequeue(out var match)) matches[node] = match;
+                string? Identity(CfgRecordNode node) => node.Row is { } row ? referenceIdentities.GetValueOrDefault(row) : null;
+                var linked = left.Where(node => Identity(node) is not null).GroupBy(node => Identity(node)!)
+                    .Where(items => items.Count() == 1).ToDictionary(items => items.Key, items => items.Single(), StringComparer.Ordinal);
+                foreach (var items in right.Where(node => Identity(node) is not null).GroupBy(node => Identity(node)!))
+                    if (items.Count() == 1 && linked.TryGetValue(items.Key, out var match)) matches[items.Single()] = match;
+                var unlinkedLeft = left.Where(node => Identity(node) is null).ToArray();
+                var unlinkedRight = right.Where(node => Identity(node) is null).ToArray();
+                if (left.Length == 1 && right.Length == 1 && unlinkedLeft.Length == 1 && unlinkedRight.Length == 1)
+                    matches[right[0]] = left[0];
+                else
+                {
+                    var lookup = unlinkedLeft.GroupBy(Fingerprint).ToDictionary(items => items.Key, items => new Queue<CfgRecordNode>(items), StringComparer.Ordinal);
+                    foreach (var node in unlinkedRight)
+                        if (lookup.TryGetValue(Fingerprint(node), out var queue) && queue.TryDequeue(out var match)) matches[node] = match;
+                }
             }
         }
         var reverse = matches.ToDictionary(pair => pair.Value, pair => pair.Key);
