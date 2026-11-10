@@ -2,4 +2,4 @@
 
 ## v1.0.5
 
-- Maintenance release. The CFGBIN API and supported formats are unchanged.
+- Updated the package and installation instructions to version 1.0.5. The package targets .NET 8, .NET 9 and .NET 10.
