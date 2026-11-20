@@ -11,6 +11,31 @@ public sealed partial class CfgDocument
         return new CfgDocument(BinaryFormat.T2b, catalog) { T2b = new T2bLayout() };
     }
 
+    public static CfgDocument CreateT2b(StructureCatalog catalog, int valueWidth, int encodingCode, bool useJamCrc, IEnumerable<CfgRow> rows)
+    {
+        if (valueWidth is not (4 or 8)) throw new ArgumentOutOfRangeException(nameof(valueWidth), "T2B value width must be 4 or 8 bytes.");
+        ArgumentNullException.ThrowIfNull(rows);
+        _ = BinaryTools.Encoding(encodingCode);
+        var document = CreateT2b(catalog);
+        document.T2b!.ValueWidth = valueWidth;
+        document.T2b.EncodingCode = encodingCode;
+        document.T2b.UseJamCrc = useJamCrc;
+        foreach (var row in rows)
+        {
+            if (row is null) throw new ArgumentException("T2B records cannot be null.", nameof(rows));
+            var copy = document.CreateT2bRow(row.Name, row.Values);
+            bool raw = row.Name.Length == 13 && row.Name.StartsWith("HASH_", StringComparison.Ordinal)
+                && uint.TryParse(row.Name.AsSpan(5), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint hash) && hash == row.NameHash;
+            if (raw) copy.NameHash = row.NameHash;
+            else if (row.NameHash != 0 && row.NameHash != copy.NameHash)
+                throw new ArgumentException($"T2B record '{row.Name}' does not match its name hash.", nameof(rows));
+            document.Attach(copy);
+            document.MutableRows.Add(copy);
+        }
+        document.Catalog.ValidateLinks(document);
+        return document;
+    }
+
     public CfgRow CreateT2bRow(string name, IReadOnlyList<CfgValue> values)
     {
         RequireT2b();
@@ -19,7 +44,7 @@ public sealed partial class CfgDocument
         foreach (var value in values) ValidateT2bValue(value);
         var encoding = BinaryTools.Encoding(T2b?.EncodingCode ?? 1);
         _ = encoding.GetBytes(name);
-        return new CfgRow(name, BinaryTools.Crc32(name, encoding), Enumerable.Range(0, values.Count).Select(i => i.ToString(CultureInfo.InvariantCulture)).ToArray(), values);
+        return new CfgRow(name, BinaryTools.Crc32(name, encoding, T2b?.UseJamCrc ?? false), Enumerable.Range(0, values.Count).Select(i => i.ToString(CultureInfo.InvariantCulture)).ToArray(), values);
     }
 
     public void SetT2bValue(CfgRow row, int index, CfgValue value)
@@ -71,18 +96,18 @@ public sealed partial class CfgDocument
         foreach (var record in layout.NameRecords)
         {
             string text = BinaryTools.String(oldNames, record.Offset, originalEncoding);
-            if (record.Hash != BinaryTools.Crc32(text, originalEncoding)) throw new InvalidDataException("Cannot convert a name table containing nonstandard hashes.");
+            if (record.Hash != BinaryTools.Crc32(text, originalEncoding, layout.UseJamCrc)) throw new InvalidDataException("Cannot convert a name table containing nonstandard hashes.");
             if (!nameOffsets.TryGetValue(record.Offset, out int offset))
             {
                 offset = names.Sum(item => encoding.GetByteCount(item.Text) + 1);
                 names.Add(new PoolString(offset, text, null)); nameOffsets.Add(record.Offset, offset);
             }
-            records.Add(new NameRecord(BinaryTools.Crc32(text, encoding), offset));
+            records.Add(new NameRecord(BinaryTools.Crc32(text, encoding, layout.UseJamCrc), offset));
         }
         foreach (var row in copy.Rows)
         {
-            if (row.Name.StartsWith("HASH_", StringComparison.Ordinal)) throw new InvalidDataException("Cannot convert text encoding while record names are unresolved.");
-            row.NameHash = BinaryTools.Crc32(row.Name, encoding);
+            if (row.Name == $"HASH_{row.NameHash:X8}") throw new InvalidDataException("Cannot convert text encoding while record names are unresolved.");
+            row.NameHash = BinaryTools.Crc32(row.Name, encoding, layout.UseJamCrc);
             Array.Fill(row.StringOffsets, -1);
         }
         layout.Names = names; layout.NameRecords = records; layout.EncodingCode = code;
@@ -100,11 +125,13 @@ public sealed partial class CfgDocument
         if (row.Document != this) throw new ArgumentException("The record must belong to this document.", nameof(row));
     }
 
-    private static void ValidateT2bValue(CfgValue value)
+    private void ValidateT2bValue(CfgValue value)
     {
-        if (value.Kind is not (ValueKind.String or ValueKind.Signed or ValueKind.Float32 or ValueKind.Opaque)) throw new ArgumentException("T2B supports String, Signed, Float32 and Opaque values.", nameof(value));
+        int width = T2bValueWidth!.Value;
+        if (T2bCodec.TypeCode(value, width) < 0)
+            throw new ArgumentException($"The T2B {width * 8}-bit profile does not support {value.Kind} fields.", nameof(value));
         if (value.Kind == ValueKind.String && value.Text?.Contains('\0') == true) throw new ArgumentException("Strings cannot contain NUL.", nameof(value));
-        if (value.Kind == ValueKind.Signed) _ = checked((int)value.AsInt64());
-        else if (value.Kind != ValueKind.String) _ = checked((uint)value.Bits);
+        if (width == 4 && value.Kind == ValueKind.Signed) _ = checked((int)value.AsInt64());
+        else if (width == 4 && value.Kind != ValueKind.String) _ = checked((uint)value.Bits);
     }
 }

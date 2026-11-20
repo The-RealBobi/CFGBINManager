@@ -24,7 +24,7 @@ public static partial class CfgTextCodec
         output.Append("// @FORMAT ").Append(CfgSyntax.Quote(document.Format == BinaryFormat.T2b ? "T2B" : "RDBNP")).AppendLine(", 1;");
         if (document.Format == BinaryFormat.T2b)
         {
-            Meta("T2B_LAYOUT", selected is null ? document.T2b ?? new T2bLayout() : new T2bLayout { EncodingCode = document.TextEncodingCode ?? 1 });
+            Meta("T2B_LAYOUT", selected is null ? document.T2b ?? new T2bLayout() : new T2bLayout { EncodingCode = document.TextEncodingCode ?? 1, ValueWidth = document.T2bValueWidth ?? 4, UseJamCrc = document.T2bUsesJamCrc ?? false });
             foreach (CfgRow row in document.Rows.Where(row => selected is null || selected.Contains(row))) WriteRow(row);
         }
         else
@@ -89,7 +89,9 @@ public static partial class CfgTextCodec
                     case "FORMAT": break;
                     case "T2B_LAYOUT":
                         if (kind != BinaryFormat.T2b || hasLayout) throw new InvalidDataException("Unexpected or duplicate T2B layout.");
-                        document.T2b = JsonSerializer.Deserialize<T2bLayout>(Json(), JsonOptions) ?? throw new InvalidDataException("Missing T2B layout."); hasLayout = true; break;
+                        document.T2b = JsonSerializer.Deserialize<T2bLayout>(Json(), JsonOptions) ?? throw new InvalidDataException("Missing T2B layout.");
+                        if (document.T2b.ValueWidth is not (4 or 8)) throw new InvalidDataException("T2B value width must be 4 or 8 bytes.");
+                        hasLayout = true; break;
                     case "RDB_LAYOUT":
                         if (kind != BinaryFormat.Rdbnp || hasLayout) throw new InvalidDataException("Unexpected or duplicate RDBNP layout.");
                         document.Rdb = JsonSerializer.Deserialize<RdbLayout>(Json(), JsonOptions) ?? throw new InvalidDataException("Missing RDBNP layout."); hasLayout = true; break;
@@ -111,9 +113,9 @@ public static partial class CfgTextCodec
             if (rowLayout is null)
             {
                 if (kind != BinaryFormat.T2b) throw new InvalidDataException("RDBNP text requires native layout and field metadata; use the lossless CFG export.");
-                var values = statement.Values.Select(ParsePlain).ToArray();
+                var values = statement.Values.Select(token => ParsePlain(token, document.T2bValueWidth ?? 4)).ToArray();
                 var encoding = BinaryTools.Encoding(document.T2b?.EncodingCode ?? 1);
-                uint hash = name.StartsWith("HASH_", StringComparison.Ordinal) && uint.TryParse(name.AsSpan(5), NumberStyles.HexNumber, Invariant, out uint raw) ? raw : BinaryTools.Crc32(name, encoding);
+                uint hash = name.StartsWith("HASH_", StringComparison.Ordinal) && uint.TryParse(name.AsSpan(5), NumberStyles.HexNumber, Invariant, out uint raw) ? raw : BinaryTools.Crc32(name, encoding, document.T2bUsesJamCrc ?? false);
                 row = new CfgRow(name, hash, Enumerable.Range(0, values.Length).Select(i => i.ToString(Invariant)).ToArray(), values);
             }
             else
@@ -159,12 +161,13 @@ public static partial class CfgTextCodec
         return document;
     }
     private static bool IsIdentifier(string text) => text.Length > 0 && !text.StartsWith("//", StringComparison.Ordinal) && !text.StartsWith('@') && text.All(c => !char.IsWhiteSpace(c) && c is not ',' and not ';' and not '"' and not '\\');
-    private static CfgValue ParsePlain(Token token)
+    private static CfgValue ParsePlain(Token token, int width)
     {
         if (token.Quoted) return CfgValue.String(token.Text);
         if (token.Text == "null") return CfgValue.String(null);
-        if (!token.Text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) && (token.Text.Contains('.') || token.Text.Contains('e') || token.Text.Contains('E') || token.Text is "NaN" or "Infinity" or "-Infinity")) return CfgValue.Float(float.Parse(token.Text, NumberStyles.Float, Invariant));
-        return CfgValue.Signed(checked((int)CfgSyntax.Integer(token)));
+        if (!token.Text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) && (token.Text.Contains('.') || token.Text.Contains('e') || token.Text.Contains('E') || token.Text is "NaN" or "Infinity" or "-Infinity")) return width == 8 ? CfgValue.Double(double.Parse(token.Text, NumberStyles.Float, Invariant)) : CfgValue.Float(float.Parse(token.Text, NumberStyles.Float, Invariant));
+        long value = CfgSyntax.Integer(token);
+        return CfgValue.Signed(width == 8 ? value : checked((int)value));
     }
     private static ulong ParseUnsigned(Token token) => token.Quoted ? throw new InvalidDataException("Expected unsigned number.") : token.Text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? ulong.Parse(token.Text.AsSpan(2), NumberStyles.HexNumber, Invariant) : ulong.Parse(token.Text, NumberStyles.Integer, Invariant);
     private static IEnumerable<CfgValue> Flatten(CfgValue value) => value.Kind is ValueKind.Array or ValueKind.Structure or ValueKind.Vector ? value.Items.SelectMany(Flatten) : [value];

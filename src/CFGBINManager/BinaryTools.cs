@@ -14,7 +14,7 @@ internal static class BinaryTools
     internal static void U32(Span<byte> data, int offset, uint value) => BinaryPrimitives.WriteUInt32LittleEndian(data[offset..], value);
     internal static Encoding Encoding(int code)
     {
-        if (code == 1) return new UTF8Encoding(false, true);
+        if (code is 1 or 256 or 257) return new UTF8Encoding(false, true);
         if (code != 0) throw new InvalidDataException($"Unsupported T2B encoding code {code}.");
         System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         return System.Text.Encoding.GetEncoding(932, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
@@ -49,10 +49,10 @@ internal static class BinaryTools
         }
         return output.ToArray();
     }
-    internal static uint Crc32(string text, Encoding encoding)
+    internal static uint Crc32(string text, Encoding encoding, bool useJamCrc)
     {
         uint crc = uint.MaxValue;
         foreach (byte b in encoding.GetBytes(text)) { crc ^= b; for (int i = 0; i < 8; i++) crc = (crc >> 1) ^ ((crc & 1) != 0 ? 0xEDB88320u : 0); }
-        return ~crc;
+        return useJamCrc ? crc : ~crc;
     }
 }

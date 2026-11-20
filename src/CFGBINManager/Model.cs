@@ -9,7 +9,11 @@ public sealed record CfgField(string Name, ushort TypeCode, ushort Flags, int El
 }
 public sealed record CfgType(string Name, uint NameHash, uint LayoutId, IReadOnlyList<CfgField> Fields);
 public sealed record T2bDocumentInfo(int StringOffset, int StringLength, int StringCount, int EncodingCode);
-public sealed record T2bRowInfo(int ValueOffset, IReadOnlyList<uint> RawValues, IReadOnlyList<string> NameCandidates);
+public sealed record T2bRowInfo(int ValueOffset, IReadOnlyList<uint> RawValues, IReadOnlyList<string> NameCandidates)
+{
+    // RawValues stays available for 32-bit callers; use RawValueBits for the full storage word.
+    public IReadOnlyList<ulong> RawValueBits { get; init; } = Array.AsReadOnly(RawValues.Select(value => (ulong)value).ToArray());
+}
 public sealed record CfgStringEdit(int RowIndex, int ValueIndex, string Text);
 
 public enum ValueKind { String, Signed, Unsigned, Float32, Float64, Hash32, Hash64, Boolean, Vector, Reference16, Reference32, Array, Structure, Opaque }
@@ -115,6 +119,8 @@ public sealed partial class CfgDocument
     public BinaryFormat Format { get; }
     public int? TextEncodingCode => Format == BinaryFormat.T2b ? T2b?.EncodingCode ?? 1 : null;
     public StructureCatalog Catalog { get; }
+    public int? T2bValueWidth => Format == BinaryFormat.T2b ? T2b?.ValueWidth ?? 4 : null;
+    public bool? T2bUsesJamCrc => Format == BinaryFormat.T2b ? T2b?.UseJamCrc ?? false : null;
     public T2bDocumentInfo? T2bInfo { get; internal set; }
     public ushort? BinaryVersion => Rdb?.Version;
     public bool IsBigEndian => Rdb?.BigEndian ?? false;
@@ -169,6 +175,8 @@ public sealed partial class CfgDocument
 internal sealed class T2bLayout
 {
     public int EncodingCode { get; set; } = 1;
+    public int ValueWidth { get; set; } = 4;
+    public bool UseJamCrc { get; set; }
     public List<PoolString> Strings { get; set; } = [];
     public List<PoolString> Names { get; set; } = [];
     public List<NameRecord> NameRecords { get; set; } = [];

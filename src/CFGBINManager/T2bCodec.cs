@@ -4,7 +4,7 @@ namespace CFGBINManager;
 
 internal static class T2bCodec
 {
-    internal static CfgDocument Read(ReadOnlySpan<byte> source, StructureCatalog catalog)
+    internal static CfgDocument Read(ReadOnlySpan<byte> source, StructureCatalog catalog, int? requestedWidth)
     {
         if (source.Length < 48 || !source.Slice(source.Length - 16, 4).SequenceEqual(new byte[] { 1, 116, 50, 98 })) throw new InvalidDataException("Unknown format: expected T2B footer or RDBNP header.");
         int footer = source.Length - 16;
@@ -41,6 +41,10 @@ internal static class T2bCodec
             if (!names.TryGetValue(item.Hash, out var candidates)) names[item.Hash] = candidates = [];
             candidates.Add(BinaryTools.String(namesBytes, item.Offset, encoding));
         }
+        layout.UseJamCrc = names.Count > 0 && names.All(item => item.Value.All(name => item.Key == BinaryTools.Crc32(name, encoding, true)));
+        var strings = source.Slice(stringOffset, stringLength);
+        int width = ReadWidth(source[..stringOffset], strings, encoding, count, requestedWidth);
+        layout.ValueWidth = width;
         var document = new CfgDocument(BinaryFormat.T2b, catalog) { T2b = layout, T2bInfo = new(stringOffset, stringLength, terminators, code) };
         int cursor = 16;
         for (int rowIndex = 0; rowIndex < count; rowIndex++)
@@ -52,37 +56,98 @@ internal static class T2bCodec
             byte[] types = source.Slice(cursor, typeLength).ToArray(); cursor += typeLength;
             int aligned = BinaryTools.Align(cursor, 4);
             byte[] padding = source.Slice(cursor, aligned - cursor).ToArray(); cursor = aligned;
-            BinaryTools.Range(source[..stringOffset], cursor, checked(valueCount * 4), $"T2B row {rowIndex} values");
+            BinaryTools.Range(source[..stringOffset], cursor, checked(valueCount * width), $"T2B row {rowIndex} values");
             var values = new List<CfgValue>(); var offsets = new int[valueCount]; Array.Fill(offsets, -1);
             int valueOffset = cursor;
-            var rawValues = new uint[valueCount];
-            for (int j = 0; j < valueCount; j++, cursor += 4)
+            var rawValues = new ulong[valueCount];
+            for (int j = 0; j < valueCount; j++, cursor += width)
             {
-                uint bits = BinaryTools.U32(source, cursor); int type = (types[j / 4] >> (j % 4 * 2)) & 3;
+                ulong bits = ReadWord(source, cursor, width); int type = (types[j / 4] >> (j % 4 * 2)) & 3;
                 rawValues[j] = bits;
                 values.Add(type switch
                 {
-                    0 => CfgValue.String(bits == uint.MaxValue ? null : BinaryTools.String(source.Slice(stringOffset, stringLength), checked((int)bits), encoding)),
-                    1 => CfgValue.Signed(unchecked((int)bits)),
-                    2 => new CfgValue(ValueKind.Float32, bits, null, []),
+                    0 => CfgValue.String(bits == NullWord(width) ? null : BinaryTools.String(strings, checked((int)bits), encoding)),
+                    1 => CfgValue.Signed(width == 4 ? unchecked((int)bits) : unchecked((long)bits)),
+                    2 => new CfgValue(width == 4 ? ValueKind.Float32 : ValueKind.Float64, bits, null, []),
                     _ => new CfgValue(ValueKind.Opaque, bits, null, [])
                 });
-                if (type == 0) offsets[j] = unchecked((int)bits);
+                if (type == 0 && bits != NullWord(width)) offsets[j] = checked((int)bits);
             }
             string name = names.TryGetValue(hash, out var candidatesForHash) && candidatesForHash.Distinct().Count() == 1 ? candidatesForHash[0] : $"HASH_{hash:X8}";
             var row = new CfgRow(name, hash, Enumerable.Range(0, valueCount).Select(x => x.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray(), values) { TypeBytes = types, Padding = padding, StringOffsets = offsets };
-            row.T2bInfo = new(valueOffset, Array.AsReadOnly(rawValues), names.TryGetValue(hash, out var resolved) ? resolved.AsReadOnly() : Array.Empty<string>());
+            row.T2bInfo = new(valueOffset, Array.AsReadOnly(rawValues.Select(value => unchecked((uint)value)).ToArray()),
+                names.TryGetValue(hash, out var resolved) ? resolved.AsReadOnly() : Array.Empty<string>()) { RawValueBits = Array.AsReadOnly(rawValues) };
             document.Attach(row); document.MutableRows.Add(row);
         }
-        if (BinaryTools.Align(cursor, 16) != stringOffset) throw new InvalidDataException("T2B entry end does not match the native 32-bit profile.");
         layout.EntryGap = source.Slice(cursor, stringOffset - cursor).ToArray();
         return document;
     }
+    private static ulong ReadWord(ReadOnlySpan<byte> source, int offset, int width)
+        => width == 4 ? BinaryTools.U32(source, offset) : BinaryPrimitives.ReadUInt64LittleEndian(source[offset..]);
+
+    private static ulong NullWord(int width) => width == 4 ? uint.MaxValue : ulong.MaxValue;
+
+    private static int ReadWidth(ReadOnlySpan<byte> entries, ReadOnlySpan<byte> strings, System.Text.Encoding encoding, int count, int? requestedWidth)
+    {
+        if (requestedWidth is int width)
+        {
+            if (CheckRows(entries, strings, count, width, null)) return width;
+            throw new InvalidDataException($"T2B rows do not match the declared {width * 8}-bit value width.");
+        }
+        // Alignment padding can contain arbitrary bytes, so it cannot break a tie.
+        bool narrow = CheckRows(entries, strings, count, 4, null);
+        bool wide = CheckRows(entries, strings, count, 8, null);
+        if (narrow && (!wide || CheckRows(entries, strings, count, 4, encoding))) return 4;
+        if (wide) return 8;
+        throw new InvalidDataException("T2B rows do not match the string pool or either native value width.");
+    }
+
+    private static bool CheckRows(ReadOnlySpan<byte> entries, ReadOnlySpan<byte> strings, int count, int width, System.Text.Encoding? verifyEncoding)
+    {
+        int cursor = 16;
+        for (int row = 0; row < count; row++)
+        {
+            if (cursor > entries.Length - 5) return false;
+            int length = entries[cursor + 4];
+            int typesAt = cursor + 5;
+            int valuesAt = BinaryTools.Align(checked(typesAt + (length + 3) / 4), 4);
+            if (valuesAt > entries.Length - length * width) return false;
+            cursor = valuesAt + length * width;
+            for (int field = 0; field < length; field++)
+            {
+                int type = (entries[typesAt + field / 4] >> (field % 4 * 2)) & 3;
+                if (type != 0) continue;
+                ulong offset = ReadWord(entries, valuesAt + field * width, width);
+                if (offset == NullWord(width)) continue;
+                if (offset >= (ulong)strings.Length) return false;
+                if (verifyEncoding is not null)
+                {
+                    var tail = strings[(int)offset..];
+                    try { _ = verifyEncoding.GetCharCount(tail[..tail.IndexOf((byte)0)]); }
+                    catch (System.Text.DecoderFallbackException) { return false; }
+                }
+            }
+        }
+        return BinaryTools.Align(cursor, 16) == entries.Length;
+    }
+
+    internal static int TypeCode(CfgValue value, int width) => value.Kind switch
+    {
+        ValueKind.String => 0,
+        ValueKind.Signed => 1,
+        ValueKind.Float32 when width == 4 => 2,
+        ValueKind.Float64 when width == 8 => 2,
+        ValueKind.Opaque => 3,
+        _ => -1
+    };
+
     internal static byte[] Write(CfgDocument document)
     {
         document.Catalog.ValidateLinks(document);
         var counters = document.Catalog.CalculateCounts(document);
         T2bLayout layout = document.T2b ?? new T2bLayout();
+        int width = layout.ValueWidth;
+        if (width is not (4 or 8)) throw new InvalidDataException("T2B value width must be 4 or 8 bytes.");
         var encoding = BinaryTools.Encoding(layout.EncodingCode);
         var strings = BinaryTools.WritePool(layout.Strings, encoding).ToList();
         var names = BinaryTools.WritePool(layout.Names, encoding).ToList();
@@ -110,10 +175,10 @@ internal static class T2bCodec
             if (candidates.Length > 0 && row.Name != $"HASH_{row.NameHash:X8}" && !candidates.Contains(row.Name, StringComparer.Ordinal)) throw new InvalidDataException($"Row name '{row.Name}' disagrees with native hash 0x{row.NameHash:X8}.");
             if (!records.Any(x => x.Hash == row.NameHash))
             {
-                if (row.Name.StartsWith("HASH_", StringComparison.Ordinal)) { /* Unresolved identities need no invented name. */ }
+                if (row.Name == $"HASH_{row.NameHash:X8}") { /* Unresolved identities need no invented name. */ }
                 else
                 {
-                    if (row.NameHash != BinaryTools.Crc32(row.Name, encoding)) throw new InvalidDataException($"New T2B tag '{row.Name}' has an incorrect native CRC32.");
+                    if (row.NameHash != BinaryTools.Crc32(row.Name, encoding, layout.UseJamCrc)) throw new InvalidDataException($"New T2B tag '{row.Name}' has an incorrect native CRC32.");
                     records.Add(new NameRecord(row.NameHash, names.Count)); names.AddRange(encoding.GetBytes(row.Name)); names.Add(0);
                 }
             }
@@ -121,7 +186,8 @@ internal static class T2bCodec
             byte[] types = row.TypeBytes.Length == (n + 3) / 4 ? row.TypeBytes.ToArray() : new byte[(n + 3) / 4];
             for (int i = 0; i < n; i++)
             {
-                int code = row.Values[i].Kind switch { ValueKind.String => 0, ValueKind.Signed => 1, ValueKind.Float32 => 2, ValueKind.Opaque => 3, _ => throw new InvalidDataException($"{row.Name}[{i}] has unsupported T2B kind {row.Values[i].Kind}.") };
+                int code = TypeCode(row.Values[i], width);
+                if (code < 0) throw new InvalidDataException($"{row.Name}[{i}] has unsupported T2B {width * 8}-bit kind {row.Values[i].Kind}.");
                 types[i / 4] = (byte)((types[i / 4] & ~(3 << (i % 4 * 2))) | (code << (i % 4 * 2)));
             }
             writer.Write(types);
@@ -129,8 +195,12 @@ internal static class T2bCodec
             for (int i = 0; i < n; i++)
             {
                 var value = counters.GetValueOrDefault((row, i), row.Values[i]);
-                uint bits = value.Kind switch { ValueKind.String => unchecked((uint)StringOffset(row, i)), ValueKind.Signed => unchecked((uint)checked((int)value.AsInt64())), _ => checked((uint)value.Bits) };
-                writer.Write(bits);
+                if (width == 4)
+                {
+                    uint bits = value.Kind switch { ValueKind.String => unchecked((uint)StringOffset(row, i)), ValueKind.Signed => unchecked((uint)checked((int)value.AsInt64())), _ => checked((uint)value.Bits) };
+                    writer.Write(bits);
+                }
+                else writer.Write(value.Kind == ValueKind.String ? unchecked((ulong)StringOffset(row, i)) : value.Bits);
             }
         }
         int entryEnd = checked(16 + (int)entries.Length);

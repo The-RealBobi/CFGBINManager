@@ -2,14 +2,24 @@ namespace CFGBINManager;
 
 public static class BinCodec
 {
-    public static CfgDocument Read(ReadOnlySpan<byte> bytes, StructureCatalog catalog)
+    public static CfgDocument Read(ReadOnlySpan<byte> bytes, StructureCatalog catalog) => ReadCore(bytes, catalog, null);
+
+    public static CfgDocument Read(ReadOnlySpan<byte> bytes, StructureCatalog catalog, int t2bValueWidth)
+    {
+        if (t2bValueWidth is not (4 or 8)) throw new ArgumentOutOfRangeException(nameof(t2bValueWidth), "T2B value width must be 4 or 8 bytes.");
+        return ReadCore(bytes, catalog, t2bValueWidth);
+    }
+
+    private static CfgDocument ReadCore(ReadOnlySpan<byte> bytes, StructureCatalog catalog, int? t2bValueWidth)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         catalog.RequireProfileSelection();
         try
         {
             if (bytes.StartsWith("\u001bLua"u8)) throw new InvalidDataException("Lua bytecode is not a CFG record format.");
-            return bytes.StartsWith("RDBNP"u8) ? RdbnpCodec.Read(bytes, catalog) : T2bCodec.Read(bytes, catalog);
+            if (!bytes.StartsWith("RDBNP"u8)) return T2bCodec.Read(bytes, catalog, t2bValueWidth);
+            if (t2bValueWidth.HasValue) throw new InvalidDataException("An explicit T2B value width cannot be used for RDBNP.");
+            return RdbnpCodec.Read(bytes, catalog);
         }
         catch (Exception error) when (error is OverflowException or ArgumentOutOfRangeException or System.Text.DecoderFallbackException)
         { throw new InvalidDataException("The binary contains an invalid range, dimension or encoded string.", error); }
@@ -27,7 +37,7 @@ public static class BinCodec
         ArgumentNullException.ThrowIfNull(edits);
         if (document.Format != BinaryFormat.T2b) throw new ArgumentException("Fixed string allocations require T2B.", nameof(document));
         byte[] result = Write(document);
-        CfgDocument rebuilt = Read(result, document.Catalog);
+        CfgDocument rebuilt = Read(result, document.Catalog, document.T2bValueWidth!.Value);
         T2bDocumentInfo info = rebuilt.T2bInfo ?? throw new InvalidDataException("Missing T2B source metadata.");
         var encoding = BinaryTools.Encoding(info.EncodingCode);
         var locations = new HashSet<(int, int)>();
@@ -62,7 +72,7 @@ public static class BinCodec
             target.Fill((byte)' ');
             allocation.Bytes.CopyTo(target);
         }
-        _ = Read(result, document.Catalog);
+        _ = Read(result, document.Catalog, document.T2bValueWidth!.Value);
         return result;
     }
 }

@@ -533,6 +533,8 @@ public sealed class CfgMergePlan
     private static void CheckCompatibility(CfgDocument a, CfgDocument b)
     {
         if (a.Format != b.Format) throw new InvalidDataException("Both files must use the same binary format.");
+        if (a.T2bValueWidth != b.T2bValueWidth || a.T2bUsesJamCrc != b.T2bUsesJamCrc)
+            throw new InvalidDataException("Both T2B files must use the same value width and name hash scheme.");
         if (a.Catalog.ToText() != b.Catalog.ToText() || a.Catalog.ProfileName != b.Catalog.ProfileName) throw new InvalidDataException("Both files must use the same Structure and game profile.");
         foreach (var document in new[] { a, b })
         {
